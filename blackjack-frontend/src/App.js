@@ -2,11 +2,12 @@
 import './App.css';
 import { useState, useEffect } from "react";
 import axios from "axios";
+import GameInfoPanel from './components/GameInfoPanel';
+import CardsDisplay from './components/CardsDisplay';
 
 
 
 function App() {
-  const [message, setMessage] = useState("");
   const [gameStarted, setGameStarted] = useState(false);
   const [cardsDealt, setCardsDealt] = useState(false);
   const [cards, setCards] = useState({
@@ -22,13 +23,22 @@ function App() {
   const [playerWin, setPlayerWin] = useState(false);
   const [dealerWin, setDealerWin] = useState(false);
   const [tie, setTie] = useState(false);
+  const [betInput, setBetInput] = useState('');
+  const [betAmount, setBetAmount] = useState(0);
+  const [betDisplay, setBetDisplay] = useState(false);
+  const [balance, setBalance] = useState(0);
+  const [canSplit, setCanSplit] = useState(false);
+  const [splitHands, setSplitHands] = useState(null);
+  const [activeHand, setActiveHand] = useState(null);
 
   const startGame = () => {
 
     axios.get("http://localhost:8080/api/game/start")
         .then(response => {
-          setMessage(response.data);
+          setBalance(response.data.balance)
           setGameStarted(true);
+          setBetDisplay(true);
+          setBetAmount(0);
           //fetchCard();
           fetchDeck();
         })
@@ -53,6 +63,7 @@ function App() {
     .catch(error => console.error("Error sending deck: ", error))
   }
   const clearPastRound = () => {
+    setBetDisplay(false);
     setCardsDealt(true);
     setRoundOver(false);
     setPlayerBust(false);
@@ -61,22 +72,65 @@ function App() {
     setDealerWin(false);
     setTie(false);
     setShowDealerCards(false);
+    setCanSplit(false);
+    setSplitHands(false);
+    setActiveHand(null);
   }
 
-  const drawCards = () => {
-    axios.get("http://localhost:8080/api/game/draw")
+  const getCardNumericValue = (card) => {
+    if (["KING", "QUEEN", "JACK"].includes(card.value)) return 10;
+    if (card.value === "ACE") return 1; 
+    return parseInt(card.value, 10);
+  };
+
+  const drawCards = (betAmount) => {
+    axios.get(`http://localhost:8080/api/game/draw?bet=${betAmount}`)
         .then(response => {
             //console.log("Drawn Cards:", response.data);
             setCards(response.data.gameData); // Update to store the gameData properly
+            clearPastRound();
             setPlayerScore(response.data.gameData.player.score);
             setDealerScore(response.data.gameData.dealer.score);
-            clearPastRound()
+            setBalance(response.data.gameData.player.balance);
+            if(response.data.gameData.player.score == 21) {
+              playerBlackjack();
+            }
+            //console.log("length:", response.data.gameData.player.cards.length);
+            //console.log("card1:", getCardNumericValue(response.data.gameData.player.cards[0]));
+            //console.log("card2:", getCardNumericValue(response.data.gameData.player.cards[1]));
+            if (
+              response.data.gameData.player.cards.length === 2 &&
+              getCardNumericValue(response.data.gameData.player.cards[0]) 
+              === getCardNumericValue(response.data.gameData.player.cards[1])
+            ) {
+              //console.log("canSplit:", true);
+              setCanSplit(true); // Set state to show split button
+            } else {
+              setCanSplit(false);
+            }
         })
         .catch(error => console.error("Error drawing cards:", error));
   }
 
   const hit = () => {
-    axios.get("http://localhost:8080/api/game/hit") // Fetch one card
+    if (activeHand) {
+      // Handle split hand hit
+      axios.get(`http://localhost:8080/api/game/hitSplit?hand=${activeHand}`)
+        .then(response => {
+          const updatedHands = {...splitHands};
+          updatedHands[activeHand].cards.push(response.data.newCard);
+          updatedHands[activeHand].score = response.data.score;
+          
+          setSplitHands(updatedHands);
+          setActiveHand(response.data.activeHand);
+          
+          if (response.data.roundOver) {
+            stand();
+          }
+        })
+        .catch(error => console.error("Error hitting split hand:", error));
+    } else {
+      axios.get("http://localhost:8080/api/game/hit") // Fetch one card
         .then(response => {
             console.log("Hit Card:", response.data);
             
@@ -99,7 +153,8 @@ function App() {
             }
         })
         .catch(error => console.error("Error hitting:", error));
-};
+    }
+  };
 
 
   const stand = () => {
@@ -113,6 +168,8 @@ function App() {
             hiddenCard: response.data.hiddenCard // Update to show actual card
         }
     }));
+      setBetDisplay(true);
+      setBetAmount(0);
       setDealerScore(response.data.dealerScore);
       if(!response.data.playerBust) {
         dealerTurn()
@@ -138,26 +195,80 @@ function App() {
           }
         }));
         setDealerScore(response.data.dealerScore);
-
-        setPlayerWin(response.data.gameResults.playerWin);
-        setDealerWin(response.data.gameResults.dealerWin);
-        setTie(response.data.gameResults.tie);
-
+        setDealerBust(response.data.dealerBust);
+        setPlayerWin(response.data.playerWin);
+        setDealerWin(response.data.dealerWin);
+        setTie(response.data.tie);
+        setBalance(response.data.balance);
       })
       .catch(error => console.error("Error during dealers turn"))
   }
 
-  /*const fetchCard = () => {
-    axios.get("http://localhost:8080/api/game/card")
-      .then(response => setCard(response.data))
-      .catch(error => console.error(error))
-  }*/
+  const playerBlackjack = () => {
+    axios.get("http://localhost:8080/api/game/playerBlackjack")
+    .then(response => {
+      console.log("Dealer's revealed Card:", response.data);
+      setCards(prevCards => ({
+        ...prevCards,
+        dealer: {
+            ...prevCards.dealer,
+            hiddenCard: response.data.hiddenCard
+        }
+    }));
+      setBetDisplay(true);
+      setBetAmount(0);
+      setDealerScore(response.data.dealerScore);
+      setPlayerWin(true);
+      setShowDealerCards(true);
+      setRoundOver(true);
+      setBalance(response.data.newBalance);
+    })
+  }
+  const handleBetChange = (e) => {
+    const value = e.target.value.trim(); // Remove whitespace
+    if (value === "" || !isNaN(value)) { // Only update if empty or valid number
+      setBetInput(value);
+    }
+  };
 
-      return (
-        <div style={{ textAlign: "center", marginTop: "50px" }}>
-            {!gameStarted && <h1>Blackjack Game</h1>}
+  const handleBet = () => {
+    const trimmedInput = betInput.trim();
+    if (!trimmedInput) {
+      alert("Please enter a bet amount.");
+      return;
+    }
+  
+    const parsedBetAmount = parseInt(trimmedInput, 10);
+    if (!isNaN(parsedBetAmount) && parsedBetAmount > 0 && parsedBetAmount <= balance) {
+      setBetAmount(parsedBetAmount);
+      drawCards(parsedBetAmount);
+    } else {
+      alert("Please enter a valid positive number.(or you don't have enough money)");
+      console.log("Current betInput:", betInput); // Debugging
+    }
+  };
+
+  const split = () => {
+    axios.get("http://localhost:8080/api/game/split")
+      .then(response => {
+        console.log("Split Result:", response.data);
+        setSplitHands(response.data.splitData); 
+        setActiveHand(response.data.splitData.activeHand);
+        setCanSplit(false); 
+        setCards({
+          dealer: cards.dealer,
+          player: { cards: [] }
+        });
+      })
+      .catch(error => console.error("Error splitting:", error));
+  };
+
+
+  return (
+    <div style={{ textAlign: "center", marginTop: "50px" }}>
+      {!gameStarted && <h1>Blackjack Game</h1>}
             
-            {!gameStarted && (
+      {!gameStarted && (
                 <button
                     onClick={startGame}
                     style={{
@@ -173,111 +284,68 @@ function App() {
                 >
                     Start Game
                 </button>
-            )}
+      )}
 
-            {gameStarted && !cardsDealt && !roundOver && (
-              <button 
-              onClick={drawCards} 
-              style={{ padding: "10px", margin: "10px", backgroundColor: "#4CAF50", color: "white" }}>
-              Deal Cards
-              </button>
-            )}
+      {betDisplay && (
+        <div>
+          {/* Textbox for user input */}
+          <input
+          type="number"
+          min="1"
+          placeholder="Enter bet amount"
+          style={{
+          padding: "10px",
+          fontSize: "16px",
+          border: "2px solid #4CAF50",
+          borderRadius: "5px",
+          marginTop: "20px",
+          width: "200px"
+          }}
+          onChange={handleBetChange}
+          value={betInput}
+          />
+          <button
+            onClick={handleBet}  // ✅ Fixed: No parentheses here!
+            style={{ 
+            padding: "10px", 
+            margin: "10px", 
+            width: "100px", 
+            backgroundColor: "#4CAF50", 
+            color: "white" 
+          }}
+        >
+        Deal Cards
+        </button>
+      </div>
+      )}
 
-            {roundOver && (
-              <button 
-              onClick={drawCards} 
-              style={{ padding: "10px", margin: "10px", backgroundColor: "#4CAF50", color: "white" }}>
-              Deal Cards
-              </button>
-            )}
 
-            {playerWin && <h2><span style={{ color: 'green' }}>Player Win</span></h2>}
-            {dealerWin && <h2><span style={{ color: 'red' }}>Dealer Win</span></h2>}
-            {tie && <h2><span style={{ color: 'blue' }}>Tie</span></h2>}
+      {playerWin && <h2><span style={{ color: 'green' }}>Player Win</span></h2>}
+      {dealerWin && <h2><span style={{ color: 'red' }}>Dealer Win</span></h2>}
+      {tie && <h2><span style={{ color: 'blue' }}>Tie</span></h2>}
 
-            {cardsDealt && cards && (
-              <div>
-                <h2>Dealer's Hand (Score: {dealerScore})</h2>
-                <div style={{ display: "flex", justifyContent: "center" }}>
-                {/* Dealer's Hidden Card */}
+      <CardsDisplay 
+      cardsDealt={cardsDealt}
+      cards={cards}
+      dealerScore={dealerScore}
+      dealerBust={dealerBust}
+      showDealerCards={showDealerCards}
+      playerScore={playerScore}
+      playerBust={playerBust}
+      gameStarted={gameStarted}
+      roundOver={roundOver}
+      canSplit={canSplit}
+      hit={hit}
+      stand={stand}
+      split={split}
+      splitHands={splitHands}
+      activeHand={activeHand}
+    />
 
-                <img 
-                  src={showDealerCards ? cards.dealer.hiddenCardActual.image : cards.dealer.hiddenCard.image} 
-                  alt="Hidden Card" 
-                  style={{ width: "100px", margin: "5px" }} 
-                  />
-
-                <img src={cards.dealer.visibleCard.image} alt="Dealer's Card" style={{ width: "100px", margin: "5px" }} />
-                
-                {cards.dealer?.cards && Array.isArray(cards.dealer.cards) ? (
-                cards.dealer.cards.map((card, index) => (
-                    <img key={index} src={card.image} alt="Dealer's Card" style={{ width: "100px", margin: "5px" }} />
-                ))
-                ) : (
-                <p></p>
-                )}
-
-              </div>
-                       
-                <h2>Your Hand (Score: {playerScore}) {playerBust && <span style={{ color: 'red' }}>Bust!</span>}</h2>
-                <div style={{ display: "flex", justifyContent: "center" }}>
-                {cards.player?.cards && Array.isArray(cards.player.cards) ? (
-                cards.player.cards.map((card, index) => (
-                    <img key={index} src={card.image} alt="Player's Card" style={{ width: "100px", margin: "5px" }} />
-                ))
-                ) : (
-                <p>No cards drawn yet.</p>
-                )}
-              </div>
-
-        {gameStarted && cardsDealt && !roundOver && (
-            <div>
-              <button 
-                onClick={hit} 
-                style={{ padding: "10px", margin: "10px", backgroundColor: "#2196F3", color: "white" }}>
-                Hit
-              </button>
-              <button 
-              onClick={stand} 
-              style={{ padding: "10px", margin: "10px", backgroundColor: "#F44336", color: "white" }}>
-              Stand
-            </button>
-          </div>
-)}
+      <GameInfoPanel balance={balance} betAmount={betAmount} />
     </div>
-)}
-
-        </div>
-    );
+  );
 
 }
 export default App;
 
-/* {card && (
-          <div style={{ marginTop: "20px"}}>
-            <p style={{ fontSize: "18px" }}>{card.rank} of {card.suit}</p>
-            <img src={card.imageUrl} alt={`${card.rank} of ${card.suit}`} style={{ width: "150px", height: "auto" }} />
-          </div>
-        )} 
-          */
-
-/*function App() {
-  return (
-    <div className="App">
-      <header className="App-header">
-        <img src={logo} className="App-logo" alt="logo" />
-        <p>
-          Edit <code>src/App.js</code> and save to reload.
-        </p>
-        <a
-          className="App-link"
-          href="https://reactjs.org"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Learn React
-        </a>
-      </header>
-    </div>
-  );
-}*/
