@@ -1,232 +1,200 @@
-//import logo from './logo.svg';
-import './App.css';
-import { useState, useEffect } from "react";
+import { useState, useEffect, act } from "react";
 import axios from "axios";
 import GameInfoPanel from './components/GameInfoPanel';
 import CardsDisplay from './components/CardsDisplay';
 
-
-
 function App() {
   const [gameStarted, setGameStarted] = useState(false);
   const [cardsDealt, setCardsDealt] = useState(false);
+
   const [cards, setCards] = useState({
     dealer: { hiddenCard: {}, visibleCard: {}, cards: []},
-    player: { cards: []}
   });
+  const [playerData, setPlayerData] = useState({
+    player1: {
+      playerScore: 0,
+      playerBust: false,
+      canSplit: false,
+      playerCards: [],
+      playerWin: false,
+      dealerWin: false,
+      tie: false,
+      canDouble: false,
+      payout: 0,
+    },
+  });
+
   const [roundOver, setRoundOver] = useState(false);
-  const [playerScore, setPlayerScore] = useState(0);
   const [dealerScore, setDealerScore] = useState(0);
-  const [playerBust, setPlayerBust] = useState(false);
   const [dealerBust, setDealerBust] = useState(false);
   const [showDealerCards, setShowDealerCards] = useState(false);
-  const [playerWin, setPlayerWin] = useState(false);
-  const [dealerWin, setDealerWin] = useState(false);
-  const [tie, setTie] = useState(false);
   const [betInput, setBetInput] = useState('');
   const [betAmount, setBetAmount] = useState(0);
   const [betDisplay, setBetDisplay] = useState(false);
   const [balance, setBalance] = useState(0);
-  const [canSplit, setCanSplit] = useState(false);
-  const [splitHands, setSplitHands] = useState(null);
-  const [activeHand, setActiveHand] = useState(null);
+  const [activeHand, setActiveHand] = useState("player1");
 
   const startGame = () => {
-
     axios.get("http://localhost:8080/api/game/start")
-        .then(response => {
-          setBalance(response.data.balance)
-          setGameStarted(true);
-          setBetDisplay(true);
-          setBetAmount(0);
-          //fetchCard();
-          fetchDeck();
-        })
-        .catch(error => console.error(error));
-  }
-
-  const fetchDeck = () => {
-    axios.get("https://deckofcardsapi.com/api/deck/new/shuffle/?deck_count=8")
       .then(response => {
-        const newDeckId = response.data.deck_id;
-        //console.log("New Deck ID:", newDeckId)
-        sendDeckToBackend(newDeckId);
+        setBalance(response.data.balance);
+        setGameStarted(true);
+        setBetDisplay(true);
       })
-      .catch(error => console.error("Error fetching deck: ", error));
+      .catch(error => console.error(error));
   }
 
-  const sendDeckToBackend = (deckId) => {
-    axios.post("http://localhost:8080/api/game/setDeck", {deck_id: deckId}, 
-      { headers: { "Content-Type" : "application/json" }}
-    )
-    .then(response => console.log("Backend Reponse:", response.data))
-    .catch(error => console.error("Error sending deck: ", error))
-  }
   const clearPastRound = () => {
+    setActiveHand("player1");
     setBetDisplay(false);
     setCardsDealt(true);
     setRoundOver(false);
-    setPlayerBust(false);
     setDealerBust(false);
-    setPlayerWin(false);
-    setDealerWin(false);
-    setTie(false);
     setShowDealerCards(false);
-    setCanSplit(false);
-    setSplitHands(false);
-    setActiveHand(null);
   }
-
-  const getCardNumericValue = (card) => {
-    if (["KING", "QUEEN", "JACK"].includes(card.value)) return 10;
-    if (card.value === "ACE") return 1; 
-    return parseInt(card.value, 10);
-  };
 
   const drawCards = (betAmount) => {
     axios.get(`http://localhost:8080/api/game/draw?bet=${betAmount}`)
         .then(response => {
-            //console.log("Drawn Cards:", response.data);
-            setCards(response.data.gameData); // Update to store the gameData properly
             clearPastRound();
-            setPlayerScore(response.data.gameData.player.score);
-            setDealerScore(response.data.gameData.dealer.score);
-            setBalance(response.data.gameData.player.balance);
-            if(response.data.gameData.player.score == 21) {
-              playerBlackjack();
-            }
-            //console.log("length:", response.data.gameData.player.cards.length);
-            //console.log("card1:", getCardNumericValue(response.data.gameData.player.cards[0]));
-            //console.log("card2:", getCardNumericValue(response.data.gameData.player.cards[1]));
-            if (
-              response.data.gameData.player.cards.length === 2 &&
-              getCardNumericValue(response.data.gameData.player.cards[0]) 
-              === getCardNumericValue(response.data.gameData.player.cards[1])
-            ) {
-              //console.log("canSplit:", true);
-              setCanSplit(true); // Set state to show split button
-            } else {
-              setCanSplit(false);
+            setPlayerData(response.data.playerData);
+            setCards(response.data.dealerData);
+            setDealerScore(response.data.dealerData.dealer.score);
+            setBalance(response.data.balance);
+            if(response.data.blackjackFound) {
+              handleBlackjack();
             }
         })
         .catch(error => console.error("Error drawing cards:", error));
   }
 
+  const handleBlackjack = () => {
+    axios.get("http://localhost:8080/api/game/blackjack")
+      .then(response => {
+        if(response.data.tie) {
+          updatePlayerData("player1", "tie", true);
+          setDealerScore(21);
+        } 
+        else if(response.data.dealerBlackjack) {
+          updatePlayerData("player1", "dealerWin", true);
+          setDealerScore(21);
+        }
+        else if(response.data.playerBlackjack) {
+          updatePlayerData("player1", "playerWin", true);
+          updatePlayerData("player1", "playerScore", 21);
+        }
+        setRoundOver(true);
+        setShowDealerCards(true);
+        setBetDisplay(true);
+        updatePlayerData("player1", "payout", response.data.payout);
+        setBalance(response.data.balance);
+      })
+  }
+
   const hit = () => {
-    if (activeHand) {
-      // Handle split hand hit
-      axios.get(`http://localhost:8080/api/game/hitSplit?hand=${activeHand}`)
-        .then(response => {
-          const updatedHands = {...splitHands};
-          updatedHands[activeHand].cards.push(response.data.newCard);
-          updatedHands[activeHand].score = response.data.score;
-          
-          setSplitHands(updatedHands);
-          setActiveHand(response.data.activeHand);
-          
-          if (response.data.roundOver) {
-            stand();
-          }
-        })
-        .catch(error => console.error("Error hitting split hand:", error));
-    } else {
-      axios.get("http://localhost:8080/api/game/hit") // Fetch one card
-        .then(response => {
-            console.log("Hit Card:", response.data);
-            
-            if (!response.data.newCard) {
-                console.error("Invalid API response:", response.data);
-                return;
-            }
-
-            setCards(prevCards => ({
-              ...prevCards,
-              player: {
-                  ...prevCards.player,
-                  cards: prevCards.player?.cards ? [...prevCards.player.cards, response.data.newCard] : [response.data.newCard]
-              }
-          }));
-            setPlayerScore(response.data.playerScore);
-            setPlayerBust(response.data.playerBust);
-            if(response.data.roundOver) {
-              stand()
-            }
-        })
-        .catch(error => console.error("Error hitting:", error));
-    }
-  };
-
+    axios.get(`http://localhost:8080/api/game/hit?handName=${activeHand}`)
+      .then(response => {
+        const newCard = response.data.newCard;
+        addCardToPlayer(activeHand, newCard)
+        updatePlayerData(activeHand, "playerScore", response.data.playerScore);
+        updatePlayerData(activeHand, "playerBust", response.data.playerBust);
+        updatePlayerData(activeHand, "canSplit", false);
+        updatePlayerData(activeHand, "canDouble", false);
+        if(response.data.handOver && !response.data.roundOver) {
+          nextHand();
+        } else if (response.data.roundOver) {
+          stand();
+        }
+      })
+      .catch(error => console.error("Error hitting:", error));
+  }
 
   const stand = () => {
-    axios.get("http://localhost:8080/api/game/revealDealer")
-    .then(response => {
-      console.log("Dealer's revealed Card:", response.data);
-      setCards(prevCards => ({
-        ...prevCards,
-        dealer: {
-            ...prevCards.dealer,
-            hiddenCard: response.data.hiddenCard // Update to show actual card
+    axios.get(`http://localhost:8080/api/game/stand?handName=${activeHand}`)
+      .then(response => {
+        if (response.data.roundOver) {
+          dealerTurn();
+        } 
+        else {
+          nextHand();
         }
-    }));
-      setBetDisplay(true);
-      setBetAmount(0);
-      setDealerScore(response.data.dealerScore);
-      if(!response.data.playerBust) {
-        dealerTurn()
-      } else {
-        setDealerWin(true);
-      }
-      setShowDealerCards(true);
-      setRoundOver(true);
-    })
-    .catch(error => console.error("Error revealing the dealer's card:", error))
-
+      })
+      .catch(error => console.error("Error standing:", error));
   }
 
   const dealerTurn = () => {
     axios.get("http://localhost:8080/api/game/dealerTurn")
       .then(response => {
-        console.log("Dealer has taken his turn:", response.data);
         setCards(prevCards => ({
           ...prevCards,
           dealer: {
             ...prevCards.dealer,
-            cards: [...(prevCards.dealer.cards || []), ...response.data.newCards]
+            cards: response.data.dealerHand
           }
         }));
         setDealerScore(response.data.dealerScore);
-        setDealerBust(response.data.dealerBust);
-        setPlayerWin(response.data.playerWin);
-        setDealerWin(response.data.dealerWin);
-        setTie(response.data.tie);
+        setShowDealerCards(true);
+        setRoundOver(true);
+        setBetDisplay(true);
+        
+        const results = response.data.results;
+        setPlayerData(prev => {
+          const newData = {...prev};
+          Object.entries(results).forEach(([key, result]) => {
+            if (newData[key]) {
+              newData[key] = {
+                ...newData[key],
+                playerWin: result.win,
+                dealerWin: result.lose,
+                tie: result.tie,
+                payout: result.payout,
+              };
+            }
+          });
+          return newData;
+        });
+
         setBalance(response.data.balance);
+        
       })
-      .catch(error => console.error("Error during dealers turn"))
+      .catch(error => console.error("Error during dealer's turn:", error));
   }
 
-  const playerBlackjack = () => {
-    axios.get("http://localhost:8080/api/game/playerBlackjack")
+  const split = () => {
+    axios.get(`http://localhost:8080/api/game/split?handName=${activeHand}`)
+      .then(response => {
+        setPlayerData((prevData) => ({
+          ...prevData,
+          [activeHand]: {
+            ...prevData[activeHand],
+            playerCards: response.data.originalHandCards,
+            playerScore: response.data.originalHandScore,
+          },
+        }));
+        updatePlayerData(activeHand, "canSplit", false);
+        setBalance(response.data.balance);
+        addHand(response.data.newHandName, response.data.newHandCards, response.data.newHandScore);
+      })
+      .catch(error => console.error("Error splitting:", error));
+  };
+
+  const doubleUp = () => {
+    axios.get(`http://localhost:8080/api/game/double?handName=${activeHand}`)
     .then(response => {
-      console.log("Dealer's revealed Card:", response.data);
-      setCards(prevCards => ({
-        ...prevCards,
-        dealer: {
-            ...prevCards.dealer,
-            hiddenCard: response.data.hiddenCard
-        }
-    }));
-      setBetDisplay(true);
-      setBetAmount(0);
-      setDealerScore(response.data.dealerScore);
-      setPlayerWin(true);
-      setShowDealerCards(true);
-      setRoundOver(true);
-      setBalance(response.data.newBalance);
+      addCardToPlayer(activeHand, response.data.newCard);
+      updatePlayerData(activeHand, "playerScore", response.data.playerScore);
+      setBalance(response.data.balance);
+      if(response.data.handOver && !response.data.roundOver) {
+        nextHand();
+      } else if (response.data.roundOver) {
+        stand();
+      }
     })
   }
+
   const handleBetChange = (e) => {
-    const value = e.target.value.trim(); // Remove whitespace
-    if (value === "" || !isNaN(value)) { // Only update if empty or valid number
+    const value = e.target.value.trim();
+    if (value === "" || !isNaN(value)) {
       setBetInput(value);
     }
   };
@@ -248,20 +216,57 @@ function App() {
     }
   };
 
-  const split = () => {
-    axios.get("http://localhost:8080/api/game/split")
-      .then(response => {
-        console.log("Split Result:", response.data);
-        setSplitHands(response.data.splitData); 
-        setActiveHand(response.data.splitData.activeHand);
-        setCanSplit(false); 
-        setCards({
-          dealer: cards.dealer,
-          player: { cards: [] }
-        });
-      })
-      .catch(error => console.error("Error splitting:", error));
+
+  const nextHand = () => {
+    const playerNames = Object.keys(playerData); // Get all player names
+    const currentIndex = playerNames.indexOf(activeHand);
+
+    // Check if we're not at the last player
+    if (currentIndex < playerNames.length - 1) {
+      setActiveHand(playerNames[currentIndex + 1]); // Move to the next player
+    }
   };
+
+
+  const addHand = (handName, handCards, handScore) => {
+    // Check if the player already exists
+    if (!playerData[handName]) {
+      setPlayerData((prevData) => ({
+        ...prevData,
+        [handName]: {
+          playerScore: handScore,
+          playerBust: false,
+          canSplit: false,
+          playerCards: handCards,
+          playerWin: false,
+          dealerWin: false,
+          tie: false,
+          canDouble: true,
+          payout: 0,
+        },
+      }));
+    }
+  };
+  const addCardToPlayer = (handName, card) => {
+    setPlayerData((prevData) => ({
+      ...prevData,
+      [handName]: {
+        ...prevData[handName],
+        playerCards: [...prevData[handName].playerCards, card],
+      },
+    }));
+  };
+
+
+  const updatePlayerData = (handName, field, value) => {
+    setPlayerData((prevData) => ({
+      ...prevData,
+      [handName]: {
+        ...prevData[handName],
+        [field]: value
+      }
+    }))
+  }
 
 
   return (
@@ -269,83 +274,74 @@ function App() {
       {!gameStarted && <h1>Blackjack Game</h1>}
             
       {!gameStarted && (
-                <button
-                    onClick={startGame}
-                    style={{
-                        padding: "10px 20px",
-                        fontSize: "16px",
-                        cursor: "pointer",
-                        backgroundColor: "#4CAF50",
-                        color: "white",
-                        border: "none",
-                        borderRadius: "5px",
-                        marginTop: "20px"
-                    }}
-                >
-                    Start Game
-                </button>
+        <button
+          onClick={startGame}
+          style={{
+            padding: "10px 20px",
+            fontSize: "16px",
+            cursor: "pointer",
+            backgroundColor: "#4CAF50",
+            color: "white",
+            border: "none",
+            borderRadius: "5px",
+            marginTop: "20px"
+          }}
+        >
+          Start Game
+        </button>
       )}
 
       {betDisplay && (
         <div>
-          {/* Textbox for user input */}
           <input
-          type="number"
-          min="1"
-          placeholder="Enter bet amount"
-          style={{
-          padding: "10px",
-          fontSize: "16px",
-          border: "2px solid #4CAF50",
-          borderRadius: "5px",
-          marginTop: "20px",
-          width: "200px"
-          }}
-          onChange={handleBetChange}
-          value={betInput}
+            type="number"
+            min="1"
+            placeholder="Enter bet amount"
+            style={{
+              padding: "10px",
+              fontSize: "16px",
+              border: "2px solid #4CAF50",
+              borderRadius: "5px",
+              marginTop: "20px",
+              width: "200px"
+            }}
+            onChange={handleBetChange}
+            value={betInput}
           />
           <button
-            onClick={handleBet}  // ✅ Fixed: No parentheses here!
+            onClick={handleBet}
             style={{ 
-            padding: "10px", 
-            margin: "10px", 
-            width: "100px", 
-            backgroundColor: "#4CAF50", 
-            color: "white" 
-          }}
-        >
-        Deal Cards
-        </button>
-      </div>
+              padding: "10px", 
+              margin: "10px", 
+              width: "100px", 
+              backgroundColor: "#4CAF50", 
+              color: "white" 
+            }}
+          >
+            Deal Cards
+          </button>
+        </div>
       )}
 
-
-      {playerWin && <h2><span style={{ color: 'green' }}>Player Win</span></h2>}
-      {dealerWin && <h2><span style={{ color: 'red' }}>Dealer Win</span></h2>}
-      {tie && <h2><span style={{ color: 'blue' }}>Tie</span></h2>}
-
       <CardsDisplay 
-      cardsDealt={cardsDealt}
-      cards={cards}
-      dealerScore={dealerScore}
-      dealerBust={dealerBust}
-      showDealerCards={showDealerCards}
-      playerScore={playerScore}
-      playerBust={playerBust}
-      gameStarted={gameStarted}
-      roundOver={roundOver}
-      canSplit={canSplit}
-      hit={hit}
-      stand={stand}
-      split={split}
-      splitHands={splitHands}
-      activeHand={activeHand}
-    />
+        cardsDealt={cardsDealt}
+        cards={cards}
+        dealerScore={dealerScore}
+        dealerBust={dealerBust}
+        showDealerCards={showDealerCards}
+        gameStarted={gameStarted}
+        roundOver={roundOver}
+        hit={hit}
+        stand={stand}
+        split={split}
+        doubleUp={doubleUp}
+        activeHand={activeHand}
+        playerData={playerData}
+      />
 
       <GameInfoPanel balance={balance} betAmount={betAmount} />
     </div>
   );
-
 }
-export default App;
 
+export default App;
