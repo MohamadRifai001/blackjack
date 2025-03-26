@@ -14,10 +14,10 @@ import java.util.Map;
 public class GameController {
     private String deckId;
     private int balance = 0;
-    //private int bet  = 0;
     private List<GameCard> dealerHand = new ArrayList<>();
     private Map<String, PlayerHand> hands = new HashMap<>();
 
+    //Add Insurance, combat split and double if lack of money
 
     //Game Intialized with /start, creates a stack of cards that is 8 shuffled standard decks.
     @GetMapping("/start")
