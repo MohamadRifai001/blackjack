@@ -4,130 +4,379 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.RestTemplate;
 
-import javax.smartcardio.Card;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-@CrossOrigin(origins = "http://localhost:3000")
 @RestController
 @RequestMapping("/api/game")
 public class GameController {
-
     private String deckId;
-    private List<GameCard> dealerCards = new ArrayList<>();
-    private List<GameCard> playerCards = new ArrayList<>();
+    private int balance = 0;
+    //private int bet  = 0;
+    private List<GameCard> dealerHand = new ArrayList<>();
+    private Map<String, PlayerHand> hands = new HashMap<>();
 
-    @PostMapping("/setDeck")
-    public ResponseEntity<String> setDeck(@RequestBody DeckResponse deckResponse) {
-        this.deckId = deckResponse.getDeck_id();
-        //For debugging: System.out.println("Received Deck ID" + deckId);
-        return ResponseEntity.ok("Deck ID received successfully");
+
+    //Game Intialized with /start, creates a stack of cards that is 8 shuffled standard decks.
+    @GetMapping("/start")
+    public ResponseEntity<Map<String, Integer>> startGame() {
+
+        RestTemplate restTemplate = new RestTemplate();
+        Map<String, Object> newDeck = restTemplate.getForObject(
+                "https://deckofcardsapi.com/api/deck/new/shuffle/?deck_count=8",
+                    Map.class);
+
+        if (newDeck != null) { deckId = (String) newDeck.get("deck_id");}
+
+        //temp set balance to 1000 since database to store balance is not functioning atm
+        balance = 1000;
+        return ResponseEntity.ok(Map.of(
+                "balance", balance
+        ));
     }
 
-    @PostMapping("/getDeck")
-    public ResponseEntity<String> getDeck() {
-        return ResponseEntity.ok(deckId != null ? deckId: "No Deck ID set");
-    }
 
+
+    /*
+    Saves the inputted bet amount and
+    Start of every ROUND, draws 4 cards from the stack, the 1st and 3rd go to the player(user),
+    2cnd and 4th to the dealer.
+     */
     @GetMapping("/draw")
-    public ResponseEntity<?> drawCards() {
-        int count = 4;
+    public ResponseEntity<?> drawCards(@RequestParam int bet) {
         if (deckId == null) {
             return ResponseEntity.badRequest().body("No deck ID set. Must generate a deck first.");
         }
-        String url = "https://deckofcardsapi.com/api/deck/" + deckId + "/draw/?count=" + count;
-        RestTemplate restTemplate = new RestTemplate();
-        Map<String, Object> response = restTemplate.getForObject(url, Map.class);
+        //this.bet = bet;
+        balance -= bet;
 
-        if (response == null || !((Boolean) response.get("success"))) {
-            return ResponseEntity.badRequest().body("Failed to draw cards.");
-        }
-        List<Map<String, Object>> drawnCards = (List<Map<String, Object>>) response.get("cards");
+        ResponseEntity<?> drawResponse = drawCardAndHandleDeck(4, new RestTemplate());
+        if(drawResponse.getStatusCode().isError()) { return drawResponse; }
 
-        if (drawnCards.size() < count) {
-            return ResponseEntity.badRequest().body("Not enough cards drawn.");
-        }
+        Map<String, Object> result = (Map<String, Object>) drawResponse.getBody();
+        List<Map<String, Object>> drawnCards = (List<Map<String, Object>>) result.get("drawnCards");
 
-        dealerCards.clear();
-        playerCards.clear();
+        dealerHand.clear();
+        hands.clear();
 
-        playerCards.add(new GameCard(drawnCards.get(1)));
-        playerCards.add(new GameCard(drawnCards.get(3)));
+        dealerHand.add(new GameCard(drawnCards.get(1)));
+        dealerHand.add(new GameCard(drawnCards.get(3)));
+
+        List<GameCard> playerHand = new ArrayList<>();
+        playerHand.add(new GameCard(drawnCards.get(0)));
+        playerHand.add(new GameCard(drawnCards.get(2)));
+
+        hands.put("player1", new PlayerHand(false, bet, playerHand));
 
 
-        dealerCards.add(new GameCard(drawnCards.get(0))); //hidden card
-        dealerCards.add(new GameCard(drawnCards.get(2)));
+        boolean blackjackFound = calculateHandValue(dealerHand) == 21 || calculateHandValue(playerHand) == 21;
 
-        int playerScore = calculateHandValue(playerCards);
-        int dealerScore = calculateHandValue(List.of(dealerCards.get(1)));
+        boolean canSplit = playerHand.get(0).getValueAmount() == playerHand.get(1).getValueAmount();
 
-        // Structuring the response with assigned cards
-        Map<String, Object> gameData = Map.of(
-                "dealer", Map.of(
-                        "hiddenCard", Map.of("image", "https://deckofcardsapi.com/static/img/back.png"),
-                        "hiddenCardActual", dealerCards.get(0),
-                        "visibleCard", dealerCards.get(1),
-                        "score", dealerScore
-                ),
-                "player", Map.of(
-                        "cards", playerCards,
-                        "score", playerScore
+        Map<String, Object> playerData = Map.of(
+                "player1", Map.of(
+                        "playerScore", calculateHandValue(playerHand),
+                        "playerBust", false,
+                        "canSplit", canSplit,
+                        "playerCards", playerHand,
+                        "playerWin", false,
+                        "dealerWin", false,
+                        "tie", false,
+                        "canDouble", true,
+                        "payout", 0
                 )
         );
 
-        return ResponseEntity.ok(Map.of("success", true, "gameData", gameData));
+        Map<String, Object> dealerData = Map.of(
+                    "dealer", Map.of(
+                            "hiddenCard", Map.of("image", "https://deckofcardsapi.com/static/img/back.png"),
+                            "hiddenCardActual", dealerHand.get(0),
+                            "visibleCard", dealerHand.get(1),
+                            "score", calculateHandValue(List.of(dealerHand.get(1)))
+                    )
+            );
+        return ResponseEntity.ok(Map.of(
+                "success", true,
+                "playerData", playerData,
+                "dealerData", dealerData,
+                "blackjackFound", blackjackFound,
+                "balance", balance
+        ));
     }
 
 
+
+    /*
+    Blackjack handler, if player or dealer or both have blackjack
+     */
+    @GetMapping("/blackjack")
+    public ResponseEntity<?> blackjackHandler() {
+        PlayerHand playerHand = hands.get("player1");
+        List<GameCard> playerCards = playerHand.getCards();
+
+        int bet = playerHand.getBet();
+
+        boolean dealerBlackjack = dealerHand.size() == 2 && calculateHandValue(dealerHand) == 21;
+        boolean playerBlackjack = playerCards.size() == 2 && calculateHandValue(playerCards) == 21;
+        boolean tie = false;
+
+        int payout = 0;
+
+        if(dealerBlackjack && playerBlackjack) {
+            tie = true;
+            balance += bet;
+            payout = bet;
+        } else if (playerBlackjack) {
+            balance += (bet *5)/2;
+            payout = (bet * 5)/2;
+        }
+
+        return ResponseEntity.ok(Map.of(
+                "dealerBlackjack", dealerBlackjack,
+                "playerBlackjack", playerBlackjack,
+                "tie", tie,
+                "balance", balance,
+                "payout", payout
+        ));
+    }
+
+    /*
+    Hit handler, Must recieve the current hand that is in play
+     */
     @GetMapping("/hit")
-    public ResponseEntity<?> hit() {
+    public ResponseEntity<?> hit(String handName) {
         if (deckId == null) {
             return ResponseEntity.badRequest().body("No deck ID set. Must generate a deck first.");
         }
 
-        String url = "https://deckofcardsapi.com/api/deck/" + deckId + "/draw/?count=1";
-        RestTemplate restTemplate = new RestTemplate();
-        Map<String, Object> response = restTemplate.getForObject(url, Map.class);
+        ResponseEntity<?> drawResponse = drawCardAndHandleDeck(1, new RestTemplate());
+        if(drawResponse.getStatusCode().isError()) { return drawResponse; }
 
-        if (response == null || !((Boolean) response.get("success"))) {
-            return ResponseEntity.badRequest().body("Failed to draw a card.");
-        }
+        Map<String, Object> result = (Map<String, Object>) drawResponse.getBody();
+        List<Map<String, Object>> drawnCards = (List<Map<String, Object>>) result.get("drawnCards");
 
-        List<Map<String, Object>> drawnCards = (List<Map<String, Object>>) response.get("cards");
         if(drawnCards.isEmpty()) {
             return ResponseEntity.badRequest().body("No cards available.");
         }
 
-        playerCards.add(new GameCard(drawnCards.get(0)));
+        PlayerHand playerHand = hands.get(handName);
+        List<GameCard> currentCards = hands.get(handName).getCards();
 
-        int playerScore = calculateHandValue(playerCards);
-        boolean playerBust = playerScore > 21;
-        boolean roundOver = playerScore >= 21;
+        currentCards.add(new GameCard(drawnCards.get(0)));
+        playerHand.setCards(currentCards);
+
+        int playerScore = calculateHandValue(playerHand.getCards());
+        playerHand.setHandOver(playerScore >= 21);
+
+        boolean roundOver = true;
+
+        for(PlayerHand hand: hands.values()) {
+            if (!hand.getHandOver()) {
+                roundOver = false;
+                break;
+            }
+        }
 
         return ResponseEntity.ok(Map.of(
                 "success", true,
                 "newCard", drawnCards.get(0),
                 "playerScore", playerScore,
-                "playerBust", playerBust,
+                "playerBust", playerScore > 21,
+                "handOver", playerScore >= 21,
                 "roundOver", roundOver
         ));
     }
-    @GetMapping("/revealDealer")
-    public ResponseEntity<?> revealDealerCard() {
-        if(dealerCards.size() < 2) {
-            return ResponseEntity.badRequest().body("Dealer Has less than 2 cards!");
+    /*
+    stand handler
+     */
+    @GetMapping("/stand")
+    public ResponseEntity<?> stand(String handName) {
+
+        PlayerHand playerHand = hands.get(handName);
+        playerHand.setHandOver(true);
+        boolean roundOver = true;
+
+        for(PlayerHand hand: hands.values()) {
+            if (!hand.getHandOver()) {
+                roundOver = false;
+                break;
+            }
         }
+
+        return ResponseEntity.ok(Map.of("Success", true, "roundOver", roundOver));
+    }
+
+    /*
+    split
+     */
+    @GetMapping("/split")
+    public ResponseEntity<?> split(@RequestParam String handName) {
+        PlayerHand originalHand = hands.get(handName);
+        List<GameCard> originalHandCards = originalHand.getCards();
+
+        // Ensure splitting is allowed (only two cards and they must have the same value)
+        if (originalHandCards.size() != 2 ||
+                originalHandCards.get(0).getValueAmount() != originalHandCards.get(1).getValueAmount()) {
+            return ResponseEntity.badRequest().body("Split not allowed.");
+        }
+
+        // Create new hand with the second card of the original hand
+        List<GameCard> newHandCards = new ArrayList<>();
+        newHandCards.add(originalHandCards.remove(1)); // Remove second card from original hand
+        originalHand.setCards(originalHandCards);
+
+        // The player must place another bet equal to the original bet
+        balance -= originalHand.getBet();
+
+
+        // Create a new hand entry
+        String newHandName = "player" + (hands.size() + 1);
+        hands.put(newHandName, new PlayerHand(false, originalHand.getBet(), newHandCards));
+
         return ResponseEntity.ok(Map.of(
-                "hiddenCard", dealerCards.get(0),
-                "dealerScore", calculateHandValue(dealerCards),
-                "playerBust", calculateHandValue(playerCards) > 21
+                "originalHandCards", originalHandCards,
+                "originalHandScore", calculateHandValue(originalHandCards),
+                "newHandName", newHandName,
+                "newHandCards", newHandCards,
+                "newHandScore", calculateHandValue(newHandCards),
+                "balance", balance // Update balance after split
+        ));
+    }
+    /*
+    Double, get 1 extra card, and end the hand, no matter the result.
+     */
+    @GetMapping("/double")
+    public ResponseEntity<?> doubleUp(String handName) {
+        ResponseEntity<?> drawResponse = drawCardAndHandleDeck(1, new RestTemplate());
+        if(drawResponse.getStatusCode().isError()) { return drawResponse; }
+
+        Map<String, Object> result = (Map<String, Object>) drawResponse.getBody();
+        List<Map<String, Object>> drawnCards = (List<Map<String, Object>>) result.get("drawnCards");
+
+        if(drawnCards.isEmpty()) {
+            return ResponseEntity.badRequest().body("No cards available.");
+        }
+
+
+        PlayerHand playerHand = hands.get(handName);
+        List<GameCard> currentCards = hands.get(handName).getCards();
+
+        currentCards.add(new GameCard(drawnCards.get(0)));
+        playerHand.setCards(currentCards);
+        balance -= playerHand.getBet();
+        playerHand.setBet(playerHand.getBet()*2);
+
+        int playerScore = calculateHandValue(playerHand.getCards());
+        playerHand.setHandOver(true);
+
+        boolean roundOver = true;
+
+        for(PlayerHand hand: hands.values()) {
+            if (!hand.getHandOver()) {
+                roundOver = false;
+                break;
+            }
+        }
+
+        return ResponseEntity.ok(Map.of(
+                "success", true,
+                "newCard", drawnCards.get(0),
+                "playerScore", playerScore,
+                "handOver", true,
+                "roundOver", roundOver,
+                "balance", balance
+        ));
+
+    }
+
+    @GetMapping("/dealerTurn")
+    public ResponseEntity<?> dealerTurn() {
+        for(PlayerHand hand: hands.values()) {
+            if(!hand.getHandOver()) {
+                return ResponseEntity.badRequest().body("Not all hands are Over");
+            }
+        }
+
+        List<GameCard> newCards = new ArrayList<>();
+        while(calculateHandValue(dealerHand) < 17) {
+            ResponseEntity<?> drawResponse = drawCardAndHandleDeck(1, new RestTemplate());
+            if(drawResponse.getStatusCode().isError()) return drawResponse;
+
+            Map<String, Object> result = (Map<String, Object>) drawResponse.getBody();
+            List<Map<String, Object>> drawnCards = (List<Map<String, Object>>) result.get("drawnCards");
+
+            GameCard newCard = new GameCard(drawnCards.get(0));
+            dealerHand.add(newCard);
+            newCards.add(newCard);
+        }
+
+
+        //handle payout, and save results into results, need:
+        //hand: player1
+        //win: true
+        //payout: 200
+        Map<String, Object> results = new HashMap<>();
+        for (Map.Entry<String, PlayerHand> entry : hands.entrySet()) {
+            String handName = entry.getKey();
+            PlayerHand hand = entry.getValue();
+            int bet = hand.getBet();
+            int handScore = calculateHandValue(hand.getCards());
+            int dealerScore = calculateHandValue(dealerHand);
+            if (handScore > 21) {
+                results.put(handName, Map.of(
+                        "win", false,
+                        "tie", false,
+                        "lose", true,
+                        "payout", 0
+                ));
+            } else if (handScore == dealerScore) {
+                results.put(handName, Map.of(
+                        "win", false,
+                        "tie", true,
+                        "lose", false,
+                        "payout", bet
+                ));
+                balance += bet;
+            } else if (dealerScore > 21) {
+                results.put(handName, Map.of(
+                        "win", true,
+                        "tie", false,
+                        "lose", false,
+                        "payout", bet * 2
+                ));
+                balance += bet*2;
+            } else if (handScore > dealerScore){
+                results.put(handName, Map.of(
+                        "win", true,
+                        "tie", false,
+                        "lose", false,
+                        "payout", bet * 2
+                ));
+                balance += bet*2;
+            } else {
+                results.put(handName, Map.of(
+                        "win", false,
+                        "tie", false,
+                        "lose", true,
+                        "payout", 0
+                ));
+            }
+        }
+
+        return ResponseEntity.ok(Map.of(
+                "dealerHand", newCards,
+                "dealerScore", calculateHandValue(dealerHand),
+                "results", results,
+                "balance", balance
         ));
     }
 
-
-
+    //Helper methods private
+    private boolean checkBlackjack(List<GameCard> hand) {
+        return hand.size() == 2 && calculateHandValue(hand) == 21;
+    }
     private int calculateHandValue(List<GameCard> hand) {
         int sum = 0;
         int aceCount = 0;
@@ -148,78 +397,42 @@ public class GameController {
         return sum;
     }
 
-    @GetMapping("/dealerTurn")
-    public ResponseEntity<?> dealerLogic() {
-        List<GameCard> newCards = new ArrayList<>();
-
-
-        String url = "https://deckofcardsapi.com/api/deck/" + deckId + "/draw/?count=1";
-        RestTemplate restTemplate = new RestTemplate();
-
-        while(calculateHandValue(dealerCards) < 17) {
+    private ResponseEntity<?> drawCardAndHandleDeck(int count, RestTemplate restTemplate) {
+        try {
+            // Draw a card
+            String url = "https://deckofcardsapi.com/api/deck/" + deckId + "/draw/?count=" + count;
             Map<String, Object> response = restTemplate.getForObject(url, Map.class);
 
+            // Check for successful response
             if (response == null || !((Boolean) response.get("success"))) {
                 return ResponseEntity.badRequest().body("Failed to draw a card.");
             }
 
+            // Check remaining cards and reshuffle if needed
+            int remaining = (int) response.get("remaining");
+            if (remaining <= 52) {
+                Map<String, Object> newDeck = restTemplate.getForObject(
+                        "https://deckofcardsapi.com/api/deck/new/shuffle/?deck_count=8",
+                        Map.class);
+                if (newDeck != null) {
+                    deckId = (String) newDeck.get("deck_id");
+                }
+            }
+
+            // Check if any cards were drawn
             List<Map<String, Object>> drawnCards = (List<Map<String, Object>>) response.get("cards");
-            if(drawnCards.isEmpty()) {
+            if (drawnCards.isEmpty()) {
                 return ResponseEntity.badRequest().body("No cards available.");
             }
-            GameCard newCard = new GameCard(drawnCards.get(0));
-            dealerCards.add(newCard);
-            newCards.add(newCard);
-        }
 
-        boolean playerWin = calculateHandValue(dealerCards) < calculateHandValue(playerCards);
+            // Return both the card data and the potentially updated deckId
+            Map<String, Object> result = new HashMap<>();
+            result.put("drawnCards", drawnCards);
 
-        if(calculateHandValue(dealerCards) > 21) {
-            playerWin = true;
-        }
-
-        Map<String, Boolean> gameResults = new HashMap<>();
-        gameResults.put("playerWin", playerWin);
-        gameResults.put("dealerWin",
-                (calculateHandValue(dealerCards) > calculateHandValue(playerCards)
-                        && (calculateHandValue(dealerCards) <= 21))
-                );
-        gameResults.put("tie", calculateHandValue(playerCards) == calculateHandValue(dealerCards));
-
-        return ResponseEntity.ok(Map.of(
-                "success", true,
-                "newCards", newCards,
-                "dealerScore", calculateHandValue(dealerCards),
-                "gameResults", gameResults
-        ));
-    }
-
-
-
-
-
-    @GetMapping("/start")
-    public String startGame() {
-
-        return "Blackjack game started!";
-    }
-//
-//    @GetMapping("/card")
-//    public StringCard getCard() {
-//        GameCard card = GameCard.of(Suit.Hearts, Face.Ace, "https://deckofcardsapi.com/static/img/AH.png");
-//        return new StringCard(card.getFace(), card.getSuit(), card.getImageURL());
-//    }
-
-
-
-
-    public static class DeckResponse {
-        private String deck_id;
-
-        public String getDeck_id() {
-            return deck_id;
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body("Error processing card draw: " + e.getMessage());
         }
     }
-
 
 }

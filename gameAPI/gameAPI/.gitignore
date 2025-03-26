@@ -31,3 +31,9 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### local database information ###
+*.db
+*.sql
+application.properties
+.env
